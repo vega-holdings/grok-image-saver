@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Image Saver
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.6.1
 // @description  Save images from Grok AI conversations on X (Twitter) with metadata
 // @author       Your name
 // @match        https://x.com/i/grok*
@@ -11,6 +11,8 @@
 // @grant        GM_getValue
 // @require      https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js
 // ==/UserScript==
+
+
 
 (function() {
     'use strict';
@@ -25,6 +27,47 @@
     const processedImages = new Set();
     let currentConversationId = null;
     let isProcessing = false;
+
+function sanitizeText(text) {
+    try {
+        // Remove emojis and other special characters
+        text = text.replace(/[\u{10000}-\u{10FFFF}]/gu, '');
+        // Replace non-Latin1 characters with closest equivalents or remove them
+        return text.normalize('NFKD')
+                  .replace(/[\u0080-\uFFFF]/g, (ch) => {
+                      // Common replacements
+                      const replacements = {
+                          '\u2026': '...',
+                          '\u201C': '"',
+                          '\u201D': '"',
+                          '\u2018': "'",
+                          '\u2019': "'",
+                          '\u2013': '-',
+                          '\u2014': '-',
+                          '\u2122': '(TM)',
+                          '\u00A9': '(c)',
+                          '\u00AE': '(R)',
+                          '\u00B0': ' degrees',
+                          '\u00B2': '2',
+                          '\u00B3': '3',
+                          '\u00B1': '+/-',
+                          '\u00D7': 'x',
+                          '\u00F7': '/',
+                          '\u2260': '!=',
+                          '\u2264': '<=',
+                          '\u2265': '>=',
+                          '\u2190': '<-',
+                          '\u2192': '->',
+                          '\u2191': '^',
+                          '\u2193': 'v'
+                      };
+                      return replacements[ch] || '';
+                  });
+    } catch (error) {
+        log('Error sanitizing text:', error);
+        return text.replace(/[^\x00-\x7F]/g, ''); // Fallback: remove all non-ASCII
+    }
+}
 
     function getCurrentConversationId() {
         const url = new URL(window.location.href);
@@ -134,7 +177,7 @@
                         try {
                             const exif = piexif.dump({
                                 "0th": {
-                                    [piexif.ImageIFD.ImageDescription]: prompt,
+                                    [piexif.ImageIFD.ImageDescription]: sanitizeText(prompt),
                                     [piexif.ImageIFD.Software]: "Grok AI",
                                     [piexif.ImageIFD.DateTime]: new Date().toISOString(),
                                     [piexif.ImageIFD.DocumentName]: `Conversation: ${conversationId}`
