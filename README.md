@@ -7,5 +7,6 @@ it will donwnload existing and new images from a grok chat where you're generati
 saves to your download dir.
 
 if it doesn't download them all hit the rescan button after all chats load.
+apparently works on the images tab (but it won't save prompts there)
 
 goon harder.
