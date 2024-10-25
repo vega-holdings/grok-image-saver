@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Image Saver
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @description  Save images from Grok AI conversations on X (Twitter) with metadata
 // @author       Your name
 // @match        https://x.com/i/grok*
@@ -20,14 +20,15 @@
         if (DEBUG) console.log('[Grok Saver]', ...args);
     }
 
-    // Track conversation counters
+    // Track conversation counters and processed images
     let conversationCounters = GM_getValue('conversationCounters', {});
     const processedImages = new Set();
     let currentConversationId = null;
+    let isProcessing = false;
 
     function getCurrentConversationId() {
         const url = new URL(window.location.href);
-        return url.searchParams.get('conversation');
+        return url.searchParams.get('conversation') || 'unknown';
     }
 
     function getNextCounter(conversationId) {
@@ -41,53 +42,58 @@
     }
 
     function getUniqueFilename(conversationId) {
-        const date = new Date();
-        const dateStr = `${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}`;
         const counter = getNextCounter(conversationId);
         return `grok_${conversationId}_${counter.toString().padStart(3, '0')}.jpg`;
     }
 
     function extractPrompt(imageElement) {
-    try {
-        let container = imageElement;
-        let maxDepth = 10;
-        let promptText = null;
+        try {
+            let container = imageElement;
+            let maxDepth = 10;
+            let promptText = null;
 
-        while (maxDepth > 0 && container && !promptText) {
-            // Try to find prompt text in nearby elements
-            const possiblePrompts = container.querySelectorAll('div[dir="ltr"]');
-
-            for (const element of possiblePrompts) {
-                const text = element.textContent.trim();
-                // Look specifically for text that starts with the Grok response pattern
-                if (text && text.includes("I generated an image with the prompt:")) {
-                    // Extract just the prompt part
-                    const promptMatch = text.match(/I generated an image with the prompt: [''](.+?)['']$/);
-                    if (promptMatch) {
-                        promptText = promptMatch[1];
-                        break;
+            while (maxDepth > 0 && container && !promptText) {
+                // Try Grok's response format first
+                const grokResponses = container.querySelectorAll('div[dir="ltr"]');
+                for (const element of grokResponses) {
+                    const text = element.textContent.trim();
+                    if (text && text.includes("I generated an image with the prompt:")) {
+                        const promptMatch = text.match(/I generated an image with the prompt: [''](.+?)['']$/);
+                        if (promptMatch) {
+                            promptText = promptMatch[1];
+                            log('Found Grok response prompt:', promptText);
+                            break;
+                        }
                     }
                 }
+
+                // Try direct user prompt if no Grok response found
+                if (!promptText) {
+                    const directPrompts = container.querySelectorAll('.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3');
+                    for (const element of directPrompts) {
+                        const text = element.textContent.trim();
+                        if (text && text.length > 10 && !text.includes("I generated")) {
+                            promptText = text;
+                            log('Found direct prompt:', promptText);
+                            break;
+                        }
+                    }
+                }
+
+                container = container.parentElement;
+                maxDepth--;
             }
 
-            container = container.parentElement;
-            maxDepth--;
+            return promptText || 'No prompt available';
+        } catch (error) {
+            log('Error extracting prompt:', error);
+            return 'Error extracting prompt';
         }
-
-        return promptText || 'No prompt available';
-    } catch (error) {
-        log('Error extracting prompt:', error);
-        return 'Error extracting prompt';
     }
-}
+
     function saveImage(imageUrl, prompt, retryCount = 0) {
         const MAX_RETRIES = 3;
         const conversationId = getCurrentConversationId();
-
-        if (!conversationId) {
-            log('No conversation ID found');
-            return;
-        }
 
         if (processedImages.has(imageUrl)) {
             log('Image already processed:', imageUrl);
@@ -103,75 +109,76 @@
             url: imageUrl,
             responseType: "blob",
             onload: function(response) {
-                try {
-                    const blob = response.response;
-                    const reader = new FileReader();
-
-                    reader.onloadend = function() {
-                        const base64data = reader.result;
-
-                        const img = new Image();
-                        img.onload = function() {
-                            try {
-                                const canvas = document.createElement('canvas');
-                                const ctx = canvas.getContext('2d');
-                                canvas.width = img.width;
-                                canvas.height = img.height;
-                                ctx.drawImage(img, 0, 0);
-
-                                const exif = piexif.dump({
-                                    "0th": {
-                                        [piexif.ImageIFD.ImageDescription]: prompt,
-                                        [piexif.ImageIFD.Software]: "Grok AI",
-                                        [piexif.ImageIFD.DateTime]: new Date().toISOString(),
-                                        [piexif.ImageIFD.DocumentName]: `Conversation: ${conversationId}`
-                                    }
-                                });
-
-                                const exifStr = piexif.insert(exif, canvas.toDataURL("image/jpeg", 0.95));
-                                const filename = getUniqueFilename(conversationId);
-
-                                GM_download({
-                                    url: exifStr,
-                                    name: filename,
-                                    saveAs: false,
-                                    onload: () => {
-                                        log(`Successfully saved: ${filename}`);
-                                        processedImages.add(imageUrl);
-                                        updateStatusPanel(`Last saved: ${filename}`);
-                                    },
-                                    onerror: (error) => {
-                                        log(`Error saving ${filename}:`, error);
-                                        if (retryCount < MAX_RETRIES) {
-                                            setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
-                                        }
-                                    }
-                                });
-                            } catch (error) {
-                                log('Error processing image:', error);
-                                if (retryCount < MAX_RETRIES) {
-                                    setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
-                                }
-                            }
-                        };
-
-                        img.onerror = function() {
-                            log('Error loading image');
-                            if (retryCount < MAX_RETRIES) {
-                                setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
-                            }
-                        };
-
-                        img.src = base64data;
-                    };
-
-                    reader.readAsDataURL(blob);
-                } catch (error) {
-                    log('Error in onload:', error);
+                if (response.status !== 200) {
+                    log('Error response status:', response.status);
                     if (retryCount < MAX_RETRIES) {
                         setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
                     }
+                    return;
                 }
+
+                const blob = response.response;
+                const reader = new FileReader();
+
+                reader.onloadend = function() {
+                    const base64data = reader.result;
+                    const img = new Image();
+
+                    img.onload = function() {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.drawImage(img, 0, 0);
+
+                        try {
+                            const exif = piexif.dump({
+                                "0th": {
+                                    [piexif.ImageIFD.ImageDescription]: prompt,
+                                    [piexif.ImageIFD.Software]: "Grok AI",
+                                    [piexif.ImageIFD.DateTime]: new Date().toISOString(),
+                                    [piexif.ImageIFD.DocumentName]: `Conversation: ${conversationId}`
+                                }
+                            });
+
+                            const exifStr = piexif.insert(exif, canvas.toDataURL("image/jpeg", 0.95));
+                            const filename = getUniqueFilename(conversationId);
+
+                            GM_download({
+                                url: exifStr,
+                                name: filename,
+                                saveAs: false,
+                                onload: () => {
+                                    log(`Successfully saved: ${filename}`);
+                                    processedImages.add(imageUrl);
+                                    updateStatusPanel(`Last saved: ${filename}`);
+                                },
+                                onerror: (error) => {
+                                    log(`Error saving ${filename}:`, error);
+                                    if (retryCount < MAX_RETRIES) {
+                                        setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
+                                    }
+                                }
+                            });
+                        } catch (error) {
+                            log('Error in EXIF/save:', error);
+                            if (retryCount < MAX_RETRIES) {
+                                setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
+                            }
+                        }
+                    };
+
+                    img.onerror = function() {
+                        log('Error loading image');
+                        if (retryCount < MAX_RETRIES) {
+                            setTimeout(() => saveImage(imageUrl, prompt, retryCount + 1), 1000);
+                        }
+                    };
+
+                    img.src = base64data;
+                };
+
+                reader.readAsDataURL(blob);
             },
             onerror: (error) => {
                 log('Error downloading image:', error);
@@ -182,7 +189,22 @@
         });
     }
 
-    // Status panel with conversation info
+    function scanForExistingImages() {
+        if (isProcessing) return;
+        isProcessing = true;
+
+        log('Scanning for existing images...');
+        const images = document.querySelectorAll('img[src^="blob:"]');
+        images.forEach((img) => {
+            const prompt = extractPrompt(img);
+            if (img.src) {
+                saveImage(img.src, prompt);
+            }
+        });
+
+        isProcessing = false;
+    }
+
     let statusPanel;
     function addControlPanel() {
         statusPanel = document.createElement('div');
@@ -201,12 +223,9 @@
         updateStatusPanelContent();
         document.body.appendChild(statusPanel);
 
-        // Add click handler for rescan button
-        document.addEventListener('click', (e) => {
-            if (e.target && e.target.id === 'rescanImages') {
-                updateStatusPanel('Rescanning...');
-                scanForExistingImages();
-            }
+        document.getElementById('rescanImages')?.addEventListener('click', () => {
+            updateStatusPanel('Rescanning...');
+            scanForExistingImages();
         });
     }
 
@@ -216,22 +235,10 @@
 
         statusPanel.innerHTML = `
             <div style="margin-bottom: 5px">Grok Image Saver Active</div>
-            <div style="font-size: 12px">Conversation: ${conversationId || 'None'}</div>
+            <div style="font-size: 12px">Conversation: ${conversationId}</div>
             <div id="grokSaverStatus" style="font-size: 12px">Images in conversation: ${counter}</div>
             <button id="rescanImages" style="margin-top: 5px; padding: 3px 8px; font-size: 12px;">Rescan Images</button>
-            <button id="resetCounter" style="margin-top: 5px; margin-left: 5px; padding: 3px 8px; font-size: 12px;">Reset Counter</button>
         `;
-
-        // Add reset counter button handler
-        document.getElementById('resetCounter')?.addEventListener('click', () => {
-            const currentId = getCurrentConversationId();
-            if (currentId) {
-                conversationCounters[currentId] = 1;
-                GM_setValue('conversationCounters', conversationCounters);
-                updateStatusPanelContent();
-                log('Reset counter for conversation:', currentId);
-            }
-        });
     }
 
     function updateStatusPanel(message) {
@@ -239,39 +246,33 @@
         if (statusElement) {
             statusElement.textContent = message;
         }
+        updateStatusPanelContent();
     }
 
-    // URL change detection for conversation changes
-    function checkForConversationChange() {
-        const newConversationId = getCurrentConversationId();
-        if (newConversationId !== currentConversationId) {
-            currentConversationId = newConversationId;
-            processedImages.clear(); // Clear processed images when conversation changes
-            updateStatusPanelContent();
-            log('Conversation changed to:', currentConversationId);
-            scanForExistingImages();
-        }
-    }
-
-    // Initialize observers
-    function initializeObservers() {
-        // Observe DOM for new images
+    function observeGrokConversation() {
         const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
-                if (mutation.type === 'childList') {
-                    mutation.addedNodes.forEach((node) => {
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            const images = node.querySelectorAll('img[src^="blob:"]');
-                            images.forEach((img) => {
-                                const prompt = extractPrompt(img);
-                                if (img.src && prompt) {
-                                    saveImage(img.src, prompt);
-                                }
-                            });
-                        }
-                    });
-                }
-            });
+            if (isProcessing) return;
+            isProcessing = true;
+
+            try {
+                mutations.forEach((mutation) => {
+                    if (mutation.type === 'childList') {
+                        mutation.addedNodes.forEach((node) => {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                const images = node.querySelectorAll('img[src^="blob:"]');
+                                images.forEach((img) => {
+                                    const prompt = extractPrompt(img);
+                                    if (img.src) {
+                                        saveImage(img.src, prompt);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            } finally {
+                isProcessing = false;
+            }
         });
 
         observer.observe(document.body, {
@@ -279,19 +280,7 @@
             subtree: true
         });
 
-        // Check for URL changes
-        setInterval(checkForConversationChange, 1000);
-    }
-
-    function scanForExistingImages() {
-        log('Scanning for existing images...');
-        const images = document.querySelectorAll('img[src^="blob:"]');
-        images.forEach((img) => {
-            const prompt = extractPrompt(img);
-            if (img.src && prompt) {
-                saveImage(img.src, prompt);
-            }
-        });
+        log('Observer started');
     }
 
     // Initialize
@@ -299,8 +288,9 @@
         log('Initializing Grok Image Saver...');
         currentConversationId = getCurrentConversationId();
         addControlPanel();
-        initializeObservers();
+        observeGrokConversation();
         setTimeout(scanForExistingImages, 2000);
+        setInterval(scanForExistingImages, 10000);
     }
 
     // Start the script
